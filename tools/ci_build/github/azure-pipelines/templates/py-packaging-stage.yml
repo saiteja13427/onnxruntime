@@ -229,6 +229,7 @@ stages:
                   --config Release --update --build \
                   --skip_submodule_sync \
                   --parallel \
+                  --enable_lto \
                   --build_wheel \
                   --enable_onnx_tests --use_tensorrt --cuda_version=11.4 --tensorrt_home=/usr --cuda_home=/usr/local/cuda-11.4 --cudnn_home=/usr/local/cuda-11.4 \
                   ${{ parameters.build_py_parameters }} \
@@ -624,7 +625,7 @@ stages:
           Contents: '*.whl'
           TargetFolder: '$(Build.ArtifactStagingDirectory)'
 
- 
+
       - task: PublishBuildArtifacts@1
         displayName: 'Publish Artifact: ONNXRuntime python wheel'
         inputs:
