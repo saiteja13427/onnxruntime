@@ -13,55 +13,86 @@ namespace training {
 namespace test {
 namespace training_api {
 
-SyntheticDataLoader::SyntheticDataLoader(
-    size_t sample_count,
-    size_t batch_size)
-    : sample_count_(sample_count),
-      batch_size_(batch_size) {
-  if (sample_count < batch_size || sample_count % batch_size != 0) {
-    throw std::runtime_error("sample_count cannot be divisible by batch_size");
-  }
+namespace {
 
+void RandomFloats(std::vector<float>& rets) {
   const float scale = 1.f;
   const float mean = 0.f;
   const float seed = 123.f;
-  std::default_random_engine generator{static_cast<uint32_t>(seed)};
+  static std::default_random_engine generator{static_cast<uint32_t>(seed)};
   std::normal_distribution<float> distribution{mean, scale};
-
-  std::vector<int64_t> dims_input{static_cast<int64_t>(sample_count), static_cast<int64_t>(hidden_size_)};
-  input1_.resize(sample_count * hidden_size_);
-  std::for_each(input1_.begin(), input1_.end(),
-                [&generator, &distribution](float& value) { value = distribution(generator); });
-
-  std::vector<int64_t> dims_label{static_cast<int64_t>(sample_count)};
-  label_.resize(sample_count, 1);
-
-  num_of_batches_ = sample_count / batch_size;
+  std::for_each(rets.begin(), rets.end(),
+                [&distribution](float& value) { value = distribution(generator); });
 }
 
-void SyntheticDataLoader::GetNextBatch(std::vector<Ort::Value>& batches) {
-  batches.clear();
+template <typename IntType>
+void RandomInts(std::vector<IntType>& rets, IntType low, IntType high) {
+  static std::random_device rd;
+  static std::mt19937 generator(rd());
+  std::uniform_int_distribution<> distribution(low, high);
+  std::for_each(rets.begin(), rets.end(),
+                [&distribution](IntType& value) { value = distribution(generator); });
+}
 
-  if (batch_index_ >= num_of_batches_) {
-    batch_index_ = 0;
+}  // namespace
+
+void SyntheticSampleBatch::AddInt64Input(const std::vector<int64_t>& shape, int64_t low, int64_t high) {
+  data_vector_.emplace_back(std::make_unique<TypedSynctheticInput<int64_t>>(shape));
+  RandomInts(data_vector_.back()->GetData<int64_t>(), low, high);
+}
+
+void SyntheticSampleBatch::AddInt32Input(const std::vector<int64_t>& shape, int32_t low, int32_t high) {
+  data_vector_.emplace_back(std::make_unique<TypedSynctheticInput<int32_t>>(shape));
+  RandomInts(data_vector_.back()->GetData<int32_t>(), low, high);
+}
+
+void SyntheticSampleBatch::AddFloatInput(const std::vector<int64_t>& shape) {
+  data_vector_.emplace_back(std::make_unique<TypedSynctheticInput<float>>(shape));
+  RandomFloats(data_vector_.back()->GetData<float>());
+}
+
+bool SyntheticDataLoader::GetNextSampleBatch(std::vector<Ort::Value>& batches) {
+  if (sample_batch_iter_index_ >= num_of_sample_batches) {
+    return false;
   }
 
+  batches.clear();
+
   auto memory_info = Ort::MemoryInfo::CreateCpu(OrtArenaAllocator, OrtMemTypeDefault);
+  auto& sample = sample_batch_collections_[sample_batch_iter_index_];
+  for (size_t i = 0; i < sample->NumOfInput(); ++i) {
+    auto input_ptr = sample->GetInputAtIndex(i);
+    auto shape_vector = input_ptr->ShapeVector();
+    // Be noted: the created Ort::Value won't clean the raw data after its lifetime ended.
+    auto ptr_flt = dynamic_cast<TypedSynctheticInput<float>*>(input_ptr);
+    if (ptr_flt) {
+      batches.push_back(Ort::Value::CreateTensor<float>(
+          memory_info, input_ptr->GetData<float>().data(),
+          input_ptr->NumOfBytesPerSample(), shape_vector.data(), shape_vector.size()));
+      continue;
+    }
 
-  size_t input1_offset = batch_index_ * batch_size_ * hidden_size_;
-  std::vector<int64_t> dims_input{static_cast<int64_t>(batch_size_), static_cast<int64_t>(hidden_size_)};
-  // Be noted: the created Ort::Value won't clean the raw data after its lifetime ended.
-  batches.push_back(Ort::Value::CreateTensor<float>(
-      memory_info, input1_.data() + input1_offset,
-      batch_size_ * hidden_size_, dims_input.data(), dims_input.size()));
+    auto ptr_int = dynamic_cast<TypedSynctheticInput<int64_t>*>(input_ptr);
+    if (ptr_int) {
+      batches.push_back(Ort::Value::CreateTensor<int64_t>(
+          memory_info, input_ptr->GetData<int64_t>().data(),
+          input_ptr->NumOfBytesPerSample(), shape_vector.data(), shape_vector.size()));
+      continue;
+    }
 
-  size_t label_offset = batch_index_ * batch_size_;
-  std::vector<int64_t> dims_label{static_cast<int64_t>(batch_size_)};
-  batches.push_back(Ort::Value::CreateTensor<int32_t>(
-      memory_info, label_.data() + label_offset,
-      batch_size_, dims_label.data(), dims_label.size()));
+    auto ptr_int32 = dynamic_cast<TypedSynctheticInput<int32_t>*>(input_ptr);
+    if (ptr_int32) {
+      batches.push_back(Ort::Value::CreateTensor<int32_t>(
+          memory_info, input_ptr->GetData<int32_t>().data(),
+          input_ptr->NumOfBytesPerSample(), shape_vector.data(), shape_vector.size()));
+      continue;
+    }
 
-  batch_index_ += 1;
+    throw std::runtime_error("unknown data types.");
+  }
+
+  sample_batch_iter_index_ += 1;
+  return true;
 }
 
 }  // namespace training_api

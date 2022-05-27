@@ -6,7 +6,6 @@
 #include "core/session/inference_session.h"
 #include "core/session/environment.h"
 
-#include "orttraining/training_api/include/session.h"
 #include "orttraining/training_api/include/utils.h"
 #include "orttraining/training_api/include/optimizer.h"
 

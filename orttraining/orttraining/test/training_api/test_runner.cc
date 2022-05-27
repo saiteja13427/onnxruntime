@@ -22,12 +22,12 @@ struct TestRunnerParameters {
   std::string output_dir;  // Output of training, e.g., trained model files.
 
   // Training configs.
-  size_t train_batch_size;
-  size_t num_train_epochs;
-  size_t eval_batch_size;
-  size_t eval_interval;
-  size_t checkpoint_interval;
-  int gradient_accumulation_steps = 1;
+  int64_t train_batch_size;
+  int64_t num_train_epochs;
+  int64_t eval_batch_size;
+  int64_t eval_interval;
+  int64_t checkpoint_interval;
+  int64_t gradient_accumulation_steps = 1;
 };
 
 void EnforceCheck(bool run_ret, std::string err_msg) {
@@ -148,60 +148,90 @@ void RunTraining(const TestRunnerParameters& params) {
                               params.optimizer_training_graph_path,
                               state.module_checkpoint_state.named_parameters);
 
-  size_t sample_count_per_epoch = 4;
-  onnxruntime::training::test::training_api::SyntheticDataLoader data_loader(sample_count_per_epoch, params.train_batch_size);
+  int64_t sample_batch_count_per_epoch = 4;
+  if (sample_batch_count_per_epoch < params.train_batch_size || sample_batch_count_per_epoch % params.train_batch_size != 0) {
+    throw std::runtime_error("sample_count cannot be divisible by batch_size");
+  }
+  int64_t num_of_batches = sample_batch_count_per_epoch / params.train_batch_size;
 
-  int64_t total_step_count = static_cast<int64_t>(params.num_train_epochs * data_loader.NumOfBatches());
+  onnxruntime::training::test::training_api::SyntheticDataLoader data_loader;
+  bool sample_model = false;
+  if (sample_model) {
+    std::vector<int64_t> input1_shape{params.train_batch_size, 784};
+    std::vector<int64_t> target_shape{params.train_batch_size};
+    for (int64_t i = 0; i < num_of_batches; ++i) {
+      auto sample = std::make_unique<onnxruntime::training::test::training_api::SyntheticSampleBatch>();
+      sample->AddFloatInput(input1_shape);
+      sample->AddInt32Input(target_shape, 0, 1);
+      data_loader.AddSyntheticSampleBatch(std::move(sample));
+    }
+  } else {
+    int64_t sequence_length = 128;
+    std::vector<int64_t> input_ids_shape{params.train_batch_size, sequence_length};
+    std::vector<int64_t> attention_mask_shape{params.train_batch_size, sequence_length};
+    std::vector<int64_t> target_shape{params.train_batch_size, 7};
+    for (int64_t i = 0; i < num_of_batches; ++i) {
+      auto sample = std::make_unique<onnxruntime::training::test::training_api::SyntheticSampleBatch>();
+      sample->AddInt64Input(input_ids_shape, 0, 250002 - 1);
+      sample->AddInt64Input(attention_mask_shape, 0, 1);
+      sample->AddFloatInput(target_shape);
+      data_loader.AddSyntheticSampleBatch(std::move(sample));
+    }
+  }
+
+  int64_t total_step_count = params.num_train_epochs * num_of_batches;
   int64_t warmup_step_count = total_step_count / 3;
 
   // TODO: update using public API's calling pattern, e.g. api.CreateLinearLRScheduler().
   Ort::OrtLinearLRScheduler scheduler = Ort::OrtLinearLRScheduler(optimizer, warmup_step_count, total_step_count);
 
-  const size_t stabilized_perf_start_step = 0;
+  const int64_t stabilized_perf_start_step = 0;
   double stabilized_total_end_to_end_time{0};
   auto end_to_end_start = std::chrono::high_resolution_clock::now();
 
-  for (size_t epoch = 0, batch_idx = 0; epoch < params.num_train_epochs; ++epoch) {
-    // for (auto it = data_loader.begin(); it != data_loader.end(); ++it) {
-    if (batch_idx >= stabilized_perf_start_step) {
-      end_to_end_start = std::chrono::high_resolution_clock::now();
+  for (int64_t epoch = 0, batch_idx = 0; epoch < params.num_train_epochs; ++epoch) {
+    for (size_t step_in_cur_epoch = 0; step_in_cur_epoch < data_loader.NumOfSampleBatches(); ++step_in_cur_epoch) {
+      if (batch_idx >= stabilized_perf_start_step) {
+        end_to_end_start = std::chrono::high_resolution_clock::now();
+      }
+
+      std::vector<Ort::Value> inputs;
+      data_loader.GetNextSampleBatch(inputs);
+
+      std::vector<Ort::Value> fetches;
+      EnforceCheck(module.TrainStep(inputs, fetches), "Failed during module.TrainStep.");
+
+      float loss = *(fetches[0].GetTensorMutableData<float>());
+      std::cout << "Batch # : " << batch_idx << " Loss: " << loss << std::endl;
+
+      if ((batch_idx + 1) % params.gradient_accumulation_steps == 0) {
+        // Gradient accumulation steps completed.
+        EnforceCheck(optimizer.Step(), "Failed during optimizer.Step().");
+        // Update learning rate.
+        EnforceCheck(scheduler.Step(), "Failed during shceduler.Step()");
+        EnforceCheck(module.ResetGrad(), "Failed during module.ResetGrad().");
+      }
+
+      if (do_eval && (batch_idx + 1) % params.eval_interval == 0) {
+        std::vector<Ort::Value> eval_results;
+        EnforceCheck(module.EvalStep(inputs, eval_results), "Failed during Module.EvalStep().");
+      }
+
+      if ((batch_idx + 1) % params.checkpoint_interval == 0) {
+        // Save trained weights
+        CheckpointState state_to_save;
+        EnforceCheck(module.GetStateDict(state_to_save.module_checkpoint_state), "Failed to load module states.");
+        EnforceCheck(optimizer.GetStateDict(state_to_save.optimizer_checkpoint_state), "Failed to load optimizer states.");
+        state_to_save.property_bag.AddProperty<int64_t>(std::string("epoch"), epoch);
+        std::string ckpt_file = params.output_dir + "/ckpt_" + params.model_name + std::to_string(batch_idx);
+
+        // TODO: update using public API's calling pattern, e.g. api.SaveCheckpoint().
+        EnforceCheck(SaveCheckpoint(state_to_save, ckpt_file).IsOK(), "Failed to save checkpoint.");
+      }
+      batch_idx++;
     }
 
-    std::vector<Ort::Value> inputs;
-    data_loader.GetNextBatch(inputs);
-
-    std::vector<Ort::Value> fetches;
-    EnforceCheck(module.TrainStep(inputs, fetches), "Failed during module.TrainStep.");
-
-    float loss = *(fetches[0].GetTensorMutableData<float>());
-    std::cout << "Batch # : " << batch_idx << " Loss: " << loss << std::endl;
-
-    if ((batch_idx + 1) % params.gradient_accumulation_steps == 0) {
-      // Gradient accumulation steps completed.
-      EnforceCheck(optimizer.Step(), "Failed during optimizer.Step().");
-      // Update learning rate.
-      EnforceCheck(scheduler.Step(), "Failed during shceduler.Step()");
-      EnforceCheck(module.ResetGrad(), "Failed during module.ResetGrad().");
-    }
-
-    if (do_eval && (batch_idx + 1) % params.eval_interval == 0) {
-      std::vector<Ort::Value> eval_results;
-      EnforceCheck(module.EvalStep(inputs, eval_results), "Failed during Module.EvalStep().");
-    }
-
-    if ((batch_idx + 1) % params.checkpoint_interval == 0) {
-      // Save trained weights
-      CheckpointState state_to_save;
-      EnforceCheck(module.GetStateDict(state_to_save.module_checkpoint_state), "Failed to load module states.");
-      EnforceCheck(optimizer.GetStateDict(state_to_save.optimizer_checkpoint_state), "Failed to load optimizer states.");
-      state_to_save.property_bag.AddProperty<int64_t>(std::string("epoch"), static_cast<int64_t>(epoch));
-      std::string ckpt_file = params.output_dir + "/ckpt_" + params.model_name + std::to_string(batch_idx);
-
-      // TODO: update using public API's calling pattern, e.g. api.SaveCheckpoint().
-      EnforceCheck(SaveCheckpoint(state_to_save, ckpt_file).IsOK(), "Failed to save checkpoint.");
-    }
-
-    batch_idx++;
+    data_loader.ResetIterateIndex();
   }
 
   auto end = std::chrono::high_resolution_clock::now();
@@ -221,6 +251,11 @@ void RunTraining(const TestRunnerParameters& params) {
 }
 
 int main(int argc, char* argv[]) {
+  // setup logger, be noted: LOGS_DEFAULT must be after logging manager initialization.
+  // This is to mitigate the issue " Attempt to use DefaultLogger but none has been registered".
+  // Need understand why the public CreateEnv did not get default logger ready.
+  Ort::Env env(ORT_LOGGING_LEVEL_WARNING, "e2e_test_runner");
+
   TestRunnerParameters params;
   EnforceCheck(ParseArguments(argc, argv, params), "Parse arguments failed.");
 

@@ -8,13 +8,87 @@ namespace training {
 namespace test {
 namespace training_api {
 
+template <typename T>
+struct TypedSynctheticInput;
+
+struct SyntheticInput {
+  SyntheticInput(const std::vector<int64_t>& shape) : shape_(shape) {
+    for (auto d : shape) {
+      num_of_bytes_per_sample_ *= d;
+    }
+  }
+
+  virtual ~SyntheticInput(){};
+
+  template <typename T>
+  std::vector<T>& GetData() {
+    auto ptr = dynamic_cast<TypedSynctheticInput<T>*>(this);
+    return ptr->Data();
+  }
+
+  size_t NumOfBytesPerSample() {
+    return num_of_bytes_per_sample_;
+  }
+
+  std::vector<int64_t> ShapeVector() const {
+    return shape_;
+  }
+
+ protected:
+  std::vector<int64_t> shape_;
+  size_t num_of_bytes_per_sample_{1};
+};
+
+template <typename T>
+struct TypedSynctheticInput : public SyntheticInput {
+  TypedSynctheticInput(const std::vector<int64_t>& shape)
+      : SyntheticInput(shape) {
+    data_.resize(num_of_bytes_per_sample_);
+  }
+
+  std::vector<T>& Data() {
+    return data_;
+  }
+
+ private:
+  std::vector<T> data_;
+};
+
+struct SyntheticSampleBatch {
+  SyntheticSampleBatch() {}
+
+  void AddInt32Input(const std::vector<int64_t>& shape, int32_t low, int32_t high);
+  void AddInt64Input(const std::vector<int64_t>& shape, int64_t low, int64_t high);
+  void AddFloatInput(const std::vector<int64_t>& shape);
+
+  size_t NumOfInput() {
+    return data_vector_.size();
+  }
+
+  SyntheticInput* GetInputAtIndex(size_t index) {
+    return data_vector_[index].get();
+  }
+
+ private:
+  std::vector<std::unique_ptr<SyntheticInput>> data_vector_;
+};
+
 struct SyntheticDataLoader {
-  SyntheticDataLoader(size_t sample_count, size_t batch_size);
+  SyntheticDataLoader() {}
 
-  void GetNextBatch(std::vector<Ort::Value>& batches);
+  void AddSyntheticSampleBatch(std::unique_ptr<SyntheticSampleBatch> samples) {
+    sample_batch_collections_.emplace_back(std::move(samples));
+    num_of_sample_batches += 1;
+  }
 
-  size_t NumOfBatches() {
-    return num_of_batches_;
+  bool GetNextSampleBatch(std::vector<Ort::Value>& batches);
+
+  size_t NumOfSampleBatches() {
+    return num_of_sample_batches;
+  }
+
+  void ResetIterateIndex() {
+    sample_batch_iter_index_ = 0;
   }
 
  private:
@@ -22,13 +96,10 @@ struct SyntheticDataLoader {
   // did not explicitly copy the data in.
   // And also, the created Ort::Value also won't clean the raw data pointer. The raw data should be removed when
   // the life time of this struct ends.
-  std::vector<float> input1_;
-  std::vector<int32_t> label_;
-  size_t sample_count_;
-  size_t batch_size_;
-  size_t batch_index_;
-  size_t num_of_batches_;
-  size_t hidden_size_ = 784;
+  std::vector<std::unique_ptr<SyntheticSampleBatch>> sample_batch_collections_;
+  int64_t sample_batch_count_;
+  size_t sample_batch_iter_index_{0};
+  size_t num_of_sample_batches{0};
 };
 
 }  // namespace training_api
