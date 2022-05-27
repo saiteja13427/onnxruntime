@@ -904,7 +904,8 @@ def generate_build_tree(
     add_default_definition(cmake_extra_defines, "onnxruntime_DEV_MODE", use_dev_mode(args))
     if args.use_cuda:
         add_default_definition(cmake_extra_defines, "onnxruntime_USE_CUDA", "ON")
-        add_default_definition(cmake_extra_defines, "onnxruntime_CUDA_VERSION", args.cuda_version)
+        if args.cuda_version:
+            add_default_definition(cmake_extra_defines, "onnxruntime_CUDA_VERSION", args.cuda_version)
         # TODO: this variable is not really needed
         add_default_definition(cmake_extra_defines, "onnxruntime_CUDA_HOME", cuda_home)
         add_default_definition(cmake_extra_defines, "onnxruntime_CUDNN_HOME", cudnn_home)
@@ -1221,7 +1222,7 @@ def generate_build_tree(
                     and not args.disable_memleak_checker
                     else "OFF"
                 ),
-                "-DCMAKE_BUILD_TYPE={}".format(config), cuda_home = args.cuda_home if args.cuda_home else os.getenv("CUDA_HOME")
+                "-DCMAKE_BUILD_TYPE={}".format(config), cuda_home = cuda_home
             ],
             cwd=config_build_dir,
         )
