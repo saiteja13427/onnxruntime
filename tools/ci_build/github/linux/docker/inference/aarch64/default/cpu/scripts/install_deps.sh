@@ -90,11 +90,5 @@ if ! [ -x "$(command -v protoc)" ]; then
   make install
 fi
 
-export ONNX_ML=1
-export CMAKE_ARGS="-DONNX_GEN_PB_TYPE_STUBS=OFF -DONNX_WERROR=OFF"
-
-pip3 install -r ${0/%install_deps\.sh/requirements\.txt}
-
-
 cd /
 rm -rf /tmp/src
