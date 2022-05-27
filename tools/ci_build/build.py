@@ -1222,9 +1222,9 @@ def generate_build_tree(
                     and not args.disable_memleak_checker
                     else "OFF"
                 ),
-                "-DCMAKE_BUILD_TYPE={}".format(config), cuda_home = cuda_home
+                "-DCMAKE_BUILD_TYPE={}".format(config)
             ],
-            cwd=config_build_dir,
+            cwd=config_build_dir, cuda_home=cuda_home
         )
 
 
